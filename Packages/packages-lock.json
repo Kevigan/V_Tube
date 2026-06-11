@@ -144,6 +144,15 @@
       },
       "url": "https://packages.unity.com"
     },
+    "jp.keijiro.klak.ndi": {
+      "version": "https://github.com/keijiro/KlakNDI.git?path=Packages/jp.keijiro.klak.ndi",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {
+        "com.unity.modules.screencapture": "1.0.0"
+      },
+      "hash": "98c2345825a94c1942a2b49d74be73abe51ea49f"
+    },
     "jp.keijiro.klak.spout": {
       "version": "https://github.com/keijiro/KlakSpout.git?path=Packages/jp.keijiro.klak.spout",
       "depth": 0,
