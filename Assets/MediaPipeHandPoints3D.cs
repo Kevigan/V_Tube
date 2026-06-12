@@ -25,8 +25,17 @@ public class MediaPipeHandPoints3D : MonoBehaviour
     private LineRenderer[] lines;
 
     private Vector3[] latestPositions;
+    private Vector3[] writePositions;
     private bool hasNewData;
     private readonly object dataLock = new object();
+    private bool pointsVisibilityInitialized;
+    private bool linesVisibilityInitialized;
+    private bool lineWidthInitialized;
+    private bool layerInitialized;
+    private bool lastShowPoints;
+    private bool lastShowLines;
+    private float lastLineWidth;
+    private int lastLayer;
 
     private static readonly int[,] handConnections =
     {
@@ -67,7 +76,7 @@ public class MediaPipeHandPoints3D : MonoBehaviour
         var landmarks = result.handLandmarks[0].landmarks;
         if (landmarks == null) return;
 
-        Vector3[] temp = new Vector3[landmarks.Count];
+        EnsureWriteBuffer(landmarks.Count);
 
         for (int i = 0; i < landmarks.Count; i++)
         {
@@ -77,12 +86,17 @@ public class MediaPipeHandPoints3D : MonoBehaviour
             float y = -(lm.y - 0.5f) * yScale;
             float z = -lm.z * zScale;
 
-            temp[i] = new Vector3(x, y, z) + offset;
+            writePositions[i] = new Vector3(x, y, z) + offset;
         }
 
         lock (dataLock)
         {
-            latestPositions = temp;
+            if (latestPositions == null || latestPositions.Length != landmarks.Count)
+                latestPositions = new Vector3[landmarks.Count];
+
+            var temp = latestPositions;
+            latestPositions = writePositions;
+            writePositions = temp;
             hasNewData = true;
         }
     }
@@ -115,6 +129,8 @@ public class MediaPipeHandPoints3D : MonoBehaviour
     void CreatePoints(int count)
     {
         points = new Transform[count];
+        pointsVisibilityInitialized = false;
+        layerInitialized = false;
 
         for (int i = 0; i < count; i++)
         {
@@ -142,6 +158,8 @@ public class MediaPipeHandPoints3D : MonoBehaviour
     void CreateLines()
     {
         lines = new LineRenderer[handConnections.GetLength(0)];
+        linesVisibilityInitialized = false;
+        lineWidthInitialized = false;
 
         for (int i = 0; i < lines.Length; i++)
         {
@@ -167,31 +185,65 @@ public class MediaPipeHandPoints3D : MonoBehaviour
 
     void UpdatePoints(Vector3[] positions)
     {
+        bool pointsVisibilityChanged = !pointsVisibilityInitialized || lastShowPoints != showPoints;
+        bool layerChanged = !layerInitialized || lastLayer != gameObject.layer;
+
         for (int i = 0; i < positions.Length; i++)
         {
             if (points[i] == null) continue;
 
             points[i].localPosition = positions[i];
-            points[i].gameObject.SetActive(showPoints);
-            points[i].gameObject.layer = gameObject.layer;
+
+            if (pointsVisibilityChanged)
+                points[i].gameObject.SetActive(showPoints);
+
+            if (layerChanged)
+                points[i].gameObject.layer = gameObject.layer;
         }
+
+        lastShowPoints = showPoints;
+        lastLayer = gameObject.layer;
+        pointsVisibilityInitialized = true;
+        layerInitialized = true;
     }
 
     void UpdateLines(Vector3[] positions)
     {
+        bool linesVisibilityChanged = !linesVisibilityInitialized || lastShowLines != showLines;
+        bool widthChanged = !lineWidthInitialized || !Mathf.Approximately(lastLineWidth, lineWidth);
+        bool applyWidth = widthChanged || linesVisibilityChanged;
+
         for (int i = 0; i < lines.Length; i++)
         {
             LineRenderer line = lines[i];
-            line.enabled = showLines;
+
+            if (linesVisibilityChanged)
+                line.enabled = showLines;
+
             if (!showLines) continue;
 
             int a = handConnections[i, 0];
             int b = handConnections[i, 1];
 
-            line.startWidth = lineWidth;
-            line.endWidth = lineWidth;
+            if (applyWidth)
+            {
+                line.startWidth = lineWidth;
+                line.endWidth = lineWidth;
+            }
+
             line.SetPosition(0, positions[a]);
             line.SetPosition(1, positions[b]);
         }
+
+        lastShowLines = showLines;
+        lastLineWidth = lineWidth;
+        linesVisibilityInitialized = true;
+        lineWidthInitialized = true;
+    }
+
+    void EnsureWriteBuffer(int count)
+    {
+        if (writePositions == null || writePositions.Length != count)
+            writePositions = new Vector3[count];
     }
 }

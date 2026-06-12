@@ -44,10 +44,24 @@ public class MediaPipeFacePoints3D : MonoBehaviour
     private Mesh faceMesh;
     private MeshRenderer meshRenderer;
     private int[] triangleIndices;
+    private int[] doubleSidedTriangleIndices;
+    private bool appliedDoubleSided;
+    private bool hasAppliedMeshTopology;
+    private Material runtimeFaceMaterial;
 
     private Vector3[] latestPositions;
+    private Vector3[] writePositions;
     private bool hasNewData;
     private readonly object dataLock = new object();
+    private bool pointsVisibilityInitialized;
+    private bool featureLineStateInitialized;
+    private bool featureLineWidthInitialized;
+    private bool lastShowPoints;
+    private bool lastShowFeatureLines;
+    private bool lastShowEyeLines;
+    private bool lastShowEyebrowLines;
+    private bool lastShowMouthLines;
+    private float lastFeatureLineWidth;
 
     private static readonly int[,] featureConnections =
 {
@@ -78,16 +92,15 @@ public class MediaPipeFacePoints3D : MonoBehaviour
     {
         faceMesh = new Mesh();
         faceMesh.name = "MediaPipe Face Mesh";
+        faceMesh.MarkDynamic();
 
         GetComponent<MeshFilter>().mesh = faceMesh;
 
         meshRenderer = GetComponent<MeshRenderer>();
 
-        Material testMat = new Material(Shader.Find("Standard"));
-        testMat = faceMaterial;
-        meshRenderer.material = testMat;
-
         triangleIndices = LoadTrianglesFromResources();
+        doubleSidedTriangleIndices = MakeDoubleSided(triangleIndices);
+        ApplyFaceMaterial();
     }
 
     void OnEnable()
@@ -100,6 +113,15 @@ public class MediaPipeFacePoints3D : MonoBehaviour
         FaceLandmarkerRunner.OnFaceResult -= OnFaceResult;
     }
 
+    void OnDestroy()
+    {
+        if (runtimeFaceMaterial != null)
+        {
+            Destroy(runtimeFaceMaterial);
+            runtimeFaceMaterial = null;
+        }
+    }
+
     void OnFaceResult(FaceLandmarkerResult result)
     {
         if (result.faceLandmarks == null || result.faceLandmarks.Count == 0)
@@ -107,8 +129,7 @@ public class MediaPipeFacePoints3D : MonoBehaviour
 
         var landmarks = result.faceLandmarks[0].landmarks;
         if (landmarks == null) return;
-
-        Vector3[] temp = new Vector3[landmarks.Count];
+        EnsureWriteBuffer(landmarks.Count);
 
         for (int i = 0; i < landmarks.Count; i++)
         {
@@ -118,12 +139,17 @@ public class MediaPipeFacePoints3D : MonoBehaviour
             float y = -(lm.y - 0.5f) * yScale;
             float z = -lm.z * zScale;
 
-            temp[i] = new Vector3(x, y, z) + offset;
+            writePositions[i] = new Vector3(x, y, z) + offset;
         }
 
         lock (dataLock)
         {
-            latestPositions = temp;
+            if (latestPositions == null || latestPositions.Length != landmarks.Count)
+                latestPositions = new Vector3[landmarks.Count];
+
+            var temp = latestPositions;
+            latestPositions = writePositions;
+            writePositions = temp;
             hasNewData = true;
         }
     }
@@ -154,13 +180,20 @@ public class MediaPipeFacePoints3D : MonoBehaviour
 
     void UpdatePoints(Vector3[] positions)
     {
+        bool pointsVisibilityChanged = !pointsVisibilityInitialized || lastShowPoints != showPoints;
+
         for (int i = 0; i < positions.Length; i++)
         {
             if (points[i] == null) continue;
 
             points[i].localPosition = positions[i];
-            points[i].gameObject.SetActive(showPoints);
+
+            if (pointsVisibilityChanged)
+                points[i].gameObject.SetActive(showPoints);
         }
+
+        lastShowPoints = showPoints;
+        pointsVisibilityInitialized = true;
     }
 
     void UpdateFaceMesh(Vector3[] positions)
@@ -170,16 +203,40 @@ public class MediaPipeFacePoints3D : MonoBehaviour
         if (!showFaceSurface || triangleIndices == null || triangleIndices.Length < 3)
             return;
 
-        faceMesh.Clear();
-        faceMesh.vertices = positions;
-        faceMesh.triangles = doubleSided ? MakeDoubleSided(triangleIndices) : triangleIndices;
-        faceMesh.RecalculateNormals();
+        var targetTriangles = doubleSided ? doubleSidedTriangleIndices : triangleIndices;
+
+        if (!hasAppliedMeshTopology || appliedDoubleSided != doubleSided)
+        {
+            faceMesh.Clear();
+            faceMesh.vertices = positions;
+            faceMesh.triangles = targetTriangles;
+            appliedDoubleSided = doubleSided;
+            hasAppliedMeshTopology = true;
+        }
+        else
+        {
+            faceMesh.vertices = positions;
+        }
+
         faceMesh.RecalculateBounds();
+    }
+
+    void ApplyFaceMaterial()
+    {
+        if (faceMaterial != null)
+        {
+            meshRenderer.sharedMaterial = faceMaterial;
+            return;
+        }
+
+        runtimeFaceMaterial = new Material(Shader.Find("Standard"));
+        meshRenderer.sharedMaterial = runtimeFaceMaterial;
     }
 
     void CreatePoints(int count)
     {
         points = new Transform[count];
+        pointsVisibilityInitialized = false;
 
         for (int i = 0; i < count; i++)
         {
@@ -276,6 +333,16 @@ public class MediaPipeFacePoints3D : MonoBehaviour
         if (featureLines == null)
             CreateFeatureLines();
 
+        bool lineVisibilityChanged =
+            !featureLineStateInitialized
+            || lastShowFeatureLines != showFeatureLines
+            || lastShowEyeLines != showEyeLines
+            || lastShowEyebrowLines != showEyebrowLines
+            || lastShowMouthLines != showMouthLines;
+        bool widthChanged =
+            !featureLineWidthInitialized || !Mathf.Approximately(lastFeatureLineWidth, featureLineWidth);
+        bool applyWidth = widthChanged || lineVisibilityChanged;
+
         for (int i = 0; i < featureLines.Length; i++)
         {
             bool visible = showFeatureLines;
@@ -288,24 +355,39 @@ public class MediaPipeFacePoints3D : MonoBehaviour
                 visible &= showMouthLines;
 
             LineRenderer line = featureLines[i];
-            line.enabled = visible;
+
+            if (lineVisibilityChanged)
+                line.enabled = visible;
 
             if (!visible) continue;
 
             int a = featureConnections[i, 0];
             int b = featureConnections[i, 1];
 
-            line.startWidth = featureLineWidth;
-            line.endWidth = featureLineWidth;
+            if (applyWidth)
+            {
+                line.startWidth = featureLineWidth;
+                line.endWidth = featureLineWidth;
+            }
 
             line.SetPosition(0, positions[a]);
             line.SetPosition(1, positions[b]);
         }
+
+        lastShowFeatureLines = showFeatureLines;
+        lastShowEyeLines = showEyeLines;
+        lastShowEyebrowLines = showEyebrowLines;
+        lastShowMouthLines = showMouthLines;
+        lastFeatureLineWidth = featureLineWidth;
+        featureLineStateInitialized = true;
+        featureLineWidthInitialized = true;
     }
 
     void CreateFeatureLines()
     {
         featureLines = new LineRenderer[featureConnections.GetLength(0)];
+        featureLineStateInitialized = false;
+        featureLineWidthInitialized = false;
 
         for (int i = 0; i < featureLines.Length; i++)
         {
@@ -327,6 +409,12 @@ public class MediaPipeFacePoints3D : MonoBehaviour
 
             featureLines[i] = line;
         }
+    }
+
+    void EnsureWriteBuffer(int count)
+    {
+        if (writePositions == null || writePositions.Length != count)
+            writePositions = new Vector3[count];
     }
 
     void UpdateHatSpawnPoint(Vector3[] positions)
